@@ -1,0 +1,48 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Bajar el código
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    # 2. Instalar Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    # 3. Inicializar (Descargar plugins de AWS)
+    - name: Terraform Init
+      run: terraform init
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }} # Solo si usas cuenta educativa con token
+        AWS_REGION: 'us-east-1'
+
+    # 4. Validar código
+    - name: Terraform Plan
+      run: terraform plan
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_REGION: 'us-east-1'
+
+    # 5. Aplicar (Crear infraestructura)
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: terraform apply -auto-approve
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        AWS_REGION: 'us-east-1'
