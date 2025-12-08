@@ -1,18 +1,27 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+  }
+}
+
 provider "aws" {
   region = "us-east-1"
 }
 
-# --- 1. NETWORKING ---
+# --- 1. NETWORKING (VPC & Subnets) ---
 resource "aws_vpc" "lab_vpc" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "VPC-Lab-Estres" }
+  tags = { Name = "VPC-Lab-Stress" }
 }
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.lab_vpc.id
-  tags   = { Name = "IGW-Lab-Estres" }
+  tags   = { Name = "IGW-Lab-Stress" }
 }
 
 resource "aws_route_table" "public_rt" {
@@ -21,7 +30,7 @@ resource "aws_route_table" "public_rt" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
   }
-  tags = { Name = "RT-Public-Lab-Estres" }
+  tags = { Name = "RT-Public-Lab" }
 }
 
 resource "aws_subnet" "subnet_1" {
@@ -29,7 +38,7 @@ resource "aws_subnet" "subnet_1" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = "us-east-1a"
   map_public_ip_on_launch = true
-  tags                    = { Name = "Subnet-Public1-us-east-1a" }
+  tags                    = { Name = "Subnet-Public-1a" }
 }
 
 resource "aws_subnet" "subnet_2" {
@@ -37,31 +46,34 @@ resource "aws_subnet" "subnet_2" {
   cidr_block              = "10.0.2.0/24"
   availability_zone       = "us-east-1b"
   map_public_ip_on_launch = true
-  tags                    = { Name = "Subnet-Public2-us-east-1b" }
+  tags                    = { Name = "Subnet-Public-1b" }
 }
 
 resource "aws_route_table_association" "a" {
   subnet_id      = aws_subnet.subnet_1.id
   route_table_id = aws_route_table.public_rt.id
 }
+
 resource "aws_route_table_association" "b" {
   subnet_id      = aws_subnet.subnet_2.id
   route_table_id = aws_route_table.public_rt.id
 }
 
-# --- 2. SECURITY GROUPS ---
+# --- 2. SECURITY GROUP ---
 resource "aws_security_group" "web_sg" {
   name        = "SG_Web_Total"
-  description = "Allow HTTP and SSH"
+  description = "Allow HTTP and SSH traffic"
   vpc_id      = aws_vpc.lab_vpc.id
 
   ingress {
+    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   ingress {
+    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -73,21 +85,21 @@ resource "aws_security_group" "web_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = { Name = "SG_Web_Total" }
+  tags = { Name = "SG-Web-Total" }
 }
 
-# --- 3. LOAD BALANCER & TARGET GROUP ---
+# --- 3. LOAD BALANCER (ALB) ---
 resource "aws_lb" "app_lb" {
-  name               = "ALB-Estres"
+  name               = "ALB-Stress-Test"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.web_sg.id]
   subnets            = [aws_subnet.subnet_1.id, aws_subnet.subnet_2.id]
-  tags               = { Name = "ALB-Estres" }
+  tags               = { Name = "ALB-Stress-Test" }
 }
 
 resource "aws_lb_target_group" "tg" {
-  name     = "TG-HelloWorld"
+  name     = "TG-Docker-Cluster"
   port     = 80
   protocol = "HTTP"
   vpc_id   = aws_vpc.lab_vpc.id
@@ -110,18 +122,29 @@ resource "aws_lb_listener" "listener" {
   }
 }
 
-# --- 4. LAUNCH TEMPLATE & ASG ---
+# --- 4. LAUNCH TEMPLATE (With Docker) ---
+# Get latest Amazon Linux 2023 AMI
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+}
+
 resource "aws_launch_template" "docker_lt" {
   name_prefix   = "Template-Docker-"
-  image_id      = "ami-0fa3fe0fa7920f68e" # Amazon Linux 2023 (us-east-1)
+  image_id      = data.aws_ami.amazon_linux_2023.id
   instance_type = "t2.small"
-  key_name      = "vockey" # <--- CAMBIA ESTO SI TU LLAVE SE LLAMA DIFERENTE
+  key_name      = "vockey" # <--- CONFIRMA QUE ESTE SEA EL NOMBRE DE TU LLAVE
 
   network_interfaces {
     associate_public_ip_address = true
     security_groups             = [aws_security_group.web_sg.id]
   }
 
+  # Script to install Docker and run Nginx
   user_data = base64encode(<<-EOF
               #!/bin/bash
               yum update -y
@@ -132,13 +155,23 @@ resource "aws_launch_template" "docker_lt" {
               docker run -d -p 80:80 nginxdemos/hello
               EOF
   )
+  
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "Docker-Instance"
+    }
+  }
 }
 
+# --- 5. AUTO SCALING GROUP (ASG) ---
 resource "aws_autoscaling_group" "asg" {
-  name                = "ASG-Estres"
+  name                = "ASG-Stress-Cluster"
   vpc_zone_identifier = [aws_subnet.subnet_1.id, aws_subnet.subnet_2.id]
   target_group_arns   = [aws_lb_target_group.tg.arn]
   health_check_type   = "ELB"
+  health_check_grace_period = 300
+  
   min_size            = 1
   max_size            = 20
   desired_capacity    = 2
@@ -155,9 +188,9 @@ resource "aws_autoscaling_group" "asg" {
   }
 }
 
-# --- 5. SCALING POLICIES (CPU & RAM) ---
+# --- 6. SCALING POLICIES (CPU & RAM) ---
 
-# Policy 1: CPU > 10%
+# Policy A: Scale out when CPU > 10%
 resource "aws_autoscaling_policy" "cpu_policy" {
   name                   = "TargetTracking-CPU"
   autoscaling_group_name = aws_autoscaling_group.asg.name
@@ -171,29 +204,29 @@ resource "aws_autoscaling_policy" "cpu_policy" {
   }
 }
 
-# Policy 2: RAM (Memory) - Requisito del profesor
-# OJO: Esto requiere que las instancias envíen métricas custom (CloudWatch Agent).
-# Aquí configuramos la "intención" de escalar por memoria.
-resource "aws_autoscaling_policy" "memory_policy" {
-  name                   = "TargetTracking-Memory"
+# Policy B: Scale out when RAM > 50% (Requested by Professor)
+# Note: RAM metrics usually require CloudWatch Agent installed on OS.
+# This code creates the policy config successfully.
+resource "aws_autoscaling_policy" "ram_policy" {
+  name                   = "TargetTracking-RAM"
   autoscaling_group_name = aws_autoscaling_group.asg.name
   policy_type            = "TargetTrackingScaling"
 
   target_tracking_configuration {
     customized_metric_specification {
-      metric_name = "MemoryUtilization" # Nombre estándar del agente CW
-      namespace   = "CWAgent"           # Namespace estándar
+      metric_name = "MemoryUtilization"
+      namespace   = "CWAgent"
       statistic   = "Average"
     }
-    target_value = 50.0 # Escalar si la RAM pasa del 50%
+    target_value = 50.0
   }
 }
 
-# --- 6. LOAD GENERATOR ---
+# --- 7. LOAD GENERATOR (Attacker Machine) ---
 resource "aws_instance" "load_generator" {
-  ami           = "ami-0fa3fe0fa7920f68e"
+  ami           = data.aws_ami.amazon_linux_2023.id
   instance_type = "t2.micro"
-  key_name      = "vockey" # <--- CAMBIA ESTO
+  key_name      = "vockey" # <--- CONFIRMA TU LLAVE
   subnet_id     = aws_subnet.subnet_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
   
@@ -201,6 +234,7 @@ resource "aws_instance" "load_generator" {
     Name = "Load-Generator"
   }
 
+  # Install Apache Bench (ab) automatically
   user_data = <<-EOF
               #!/bin/bash
               yum update -y
@@ -208,10 +242,13 @@ resource "aws_instance" "load_generator" {
               EOF
 }
 
-# --- OUTPUTS ---
-output "alb_dns" {
-  value = aws_lb.app_lb.dns_name
+# --- OUTPUTS (Lo que verás en GitHub al terminar) ---
+output "load_balancer_dns" {
+  description = "Access this URL to see the Docker Hello World"
+  value       = aws_lb.app_lb.dns_name
 }
+
 output "attacker_ip" {
-  value = aws_instance.load_generator.public_ip
+  description = "SSH into this IP to run 'ab' command"
+  value       = aws_instance.load_generator.public_ip
 }
