@@ -252,4 +252,4 @@ output "attacker_ip" {
   description = "SSH into this IP to run 'ab' command"
   value       = aws_instance.load_generator.public_ip
 }
-#START
+#inicio
